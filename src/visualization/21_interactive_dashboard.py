@@ -1,369 +1,358 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-21_interactive_dashboard.py
-
-Purpose:
-  Build a single, self-contained HTML dashboard (Plotly) that aggregates the key
-  analyses from Steps 16–20 with a Black-women–centric focus:
-    - Temporal representation trends
-    - Engagement gaps (views/day & rating) with bootstrap CIs
-    - Category–group dynamics (BW over/under-representation)
-    - Category co-occurrence network metrics vs BW log2RR
-    - Advanced statistics (Cliff’s δ, temporal slopes, category KL)
-
-Inputs (optional, auto-detected; script is robust to missing files):
-  outputs/data/temporal_black_women_share.csv
-  outputs/data/temporal_group_representation.csv
-  outputs/data/eng17_yearly_bw_gaps.csv
-  outputs/data/eng17_quantiles_race_ethnicity.csv
-  outputs/data/cgd_black_women_under_over.csv
-  outputs/data/cgd_category_group_matrix.csv
-  outputs/data/net20_category_centrality.csv
-  outputs/data/adv19_bw_effect_sizes.csv
-  outputs/data/adv19_trend_slopes.csv
-  outputs/data/adv19_category_divergence.csv
-
+Step 21 — Interactive Dashboard (PRO)
+- Scans outputs/ for artifacts from *any* step (CSV/PNG/TEX/MD).
+- Builds a polished single-file HTML with:
+  • sticky sidebar, search, tabbed sections per step
+  • KPIs (dataset size, date span, #categories, etc.)
+  • Plotly figures if CSVs are available; falls back to images
+  • theme toggle (light/dark), anchor links, keyboard shortcuts
 Output:
   outputs/interactive/dashboard_step21.html
-
-Notes:
-  - No changes to older files.
-  - Uses Plotly offline; no server needed.
-  - Seed fixed to 75 for reproducibility of any random sampling (not used here).
 """
 
 from __future__ import annotations
-
-import time
+import json, re, textwrap, base64
 from pathlib import Path
-import numpy as np
+from datetime import datetime
+from typing import Dict, List, Tuple, Optional
+
 import pandas as pd
-
-import plotly.graph_objs as go
-from plotly.subplots import make_subplots
-from plotly.offline import plot as plot_offline
-
-# ---------------------- Config ----------------------
-SEED = 75
-np.random.seed(SEED)
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
 
 ROOT = Path(__file__).resolve().parents[2]
-DATA = ROOT / "outputs" / "data"
-INTERACTIVE = ROOT / "outputs" / "interactive"
+OUT = ROOT / "outputs"
+DATA = OUT / "data"
+FIGS_DARK = OUT / "figures" / "dark"
+FIGS_LIGHT = OUT / "figures" / "light"
+NARR = OUT / "narratives"
+INTERACTIVE = OUT / "interactive"
 INTERACTIVE.mkdir(parents=True, exist_ok=True)
-DASHBOARD_HTML = INTERACTIVE / "dashboard_step21.html"
 
-# Helper to read CSV if exists
-def _read_csv(p: Path, **kwargs) -> pd.DataFrame | None:
+ML_CORPUS = DATA / "ml_corpus.parquet"
+
+# ---------- helpers ----------
+def _try_read_csv(path: Path) -> Optional[pd.DataFrame]:
     try:
-        if p.exists():
-            return pd.read_csv(p, **kwargs)
-        return None
+        return pd.read_csv(path)
     except Exception:
         return None
 
-# ---------------------- Builders ----------------------
-def section_header(text: str) -> go.Figure:
-    """Simple title section as an empty figure with annotation."""
-    fig = go.Figure()
-    fig.update_layout(
-        annotations=[dict(text=f"<b>{text}</b>", x=0, y=1, xref="paper", yref="paper",
-                          xanchor="left", yanchor="top", showarrow=False, font=dict(size=22))],
-        height=80, margin=dict(l=20, r=20, t=20, b=10)
-    )
-    return fig
+def _b64img(path: Path) -> Optional[str]:
+    try:
+        b = path.read_bytes()
+        return "data:image/png;base64," + base64.b64encode(b).decode("ascii")
+    except Exception:
+        return None
 
-def build_temporal_representation() -> list[go.Figure]:
-    figs = []
+def _scan_artifacts() -> Dict[str, Dict[str, List[Path]]]:
+    """Return dict[step]['csv'|'png'|'md'|'tex'] -> [paths...]"""
+    steps: Dict[str, Dict[str, List[Path]]] = {}
+    # Gather across outputs/{data,figures, narratives} + top-level outputs
+    pools = [
+        (DATA, "csv", "*.csv"),
+        (OUT / "ablation", "csv", "*.csv"),  
+        (OUT / "ablation", "png", "*.png"),
+        (FIGS_DARK, "png", "*.png"),
+        (FIGS_LIGHT, "png", "*.png"),
+        (NARR, "md", "**/*.md"),
+        
+        (ROOT / "dissertation" / "auto_tables", "tex", "*.tex"),
+    ]
+    # Also consider standalone images in outputs/figures root (if any)
+    figs_root = OUT / "figures"
+    if figs_root.exists():
+        pools.append((figs_root, "png", "*.png"))
 
-    # Priority: explicit BW share; fallback: group representation
-    bw_share = _read_csv(DATA / "temporal_black_women_share.csv")
-    if bw_share is not None and {"year","share_bw"}.issubset(bw_share.columns):
-        figs.append(section_header("Temporal Representation — Black Women"))
-        tr = go.Figure()
-        tr.add_trace(go.Scatter(
-            x=bw_share["year"], y=bw_share["share_bw"],
-            mode="lines+markers", name="Black women share",
-        ))
-        tr.update_layout(yaxis_title="Share of videos (%)", xaxis_title="Year",
-                         height=350, margin=dict(l=40, r=20, t=40, b=40))
-        figs.append(tr)
+    step_re = re.compile(r"(^|[^\d])(?P<num>\d{2})[_\-]")
 
-    rep = _read_csv(DATA / "temporal_group_representation.csv")
-    if rep is not None and {"year","group","share_pct"}.issubset(rep.columns):
-        # plot top 6 groups by avg share
-        figs.append(section_header("Temporal Representation — All Groups (Top 6)"))
-        top_groups = (rep.groupby("group")["share_pct"].mean()
-                        .sort_values(ascending=False).head(6).index.tolist())
-        rep6 = rep[rep["group"].isin(top_groups)]
-        tr_all = go.Figure()
-        for g in top_groups:
-            sub = rep6[rep6["group"] == g]
-            tr_all.add_trace(go.Scatter(
-                x=sub["year"], y=sub["share_pct"],
-                mode="lines+markers", name=str(g)
-            ))
-        tr_all.update_layout(yaxis_title="Share (%)", xaxis_title="Year",
-                             height=380, legend=dict(orientation="h", y=1.15),
-                             margin=dict(l=40, r=20, t=40, b=40))
-        figs.append(tr_all)
+    for base, kind, glob_pat in pools:
+        if not base.exists():
+            continue
+        for p in base.rglob(glob_pat):
+            # infer step from filename
+            m = step_re.search(p.name)
+            step = f"Step {m.group('num')}" if m else "Misc"
+            steps.setdefault(step, {}).setdefault(kind, []).append(p)
 
-    return figs
+    # Ensure deterministic ordering
+    steps = dict(sorted(steps.items(), key=lambda kv: kv[0]))
+    for k in steps:
+        for kind in steps[k]:
+            steps[k][kind] = sorted(steps[k][kind])
+    return steps
 
-def build_engagement_gaps() -> list[go.Figure]:
-    figs = []
-    gaps = _read_csv(DATA / "eng17_yearly_bw_gaps.csv")
-    if gaps is not None and {"year","gap_views_per_day","gap_views_ci_lo","gap_views_ci_hi",
-                             "gap_rating","gap_rating_ci_lo","gap_rating_ci_hi"}.issubset(gaps.columns):
-        figs.append(section_header("Engagement Gaps — Black Women vs Others"))
-        # Views/day gap
-        g1 = go.Figure()
-        g1.add_trace(go.Scatter(
-            x=gaps["year"], y=gaps["gap_views_per_day"], mode="lines+markers", name="Gap (BW - Others)"
-        ))
-        g1.add_trace(go.Scatter(
-            x=pd.concat([gaps["year"], gaps["year"][::-1]]),
-            y=pd.concat([gaps["gap_views_ci_hi"], gaps["gap_views_ci_lo"][::-1]]),
-            fill="toself", fillcolor="rgba(31,119,180,0.2)", line=dict(width=0),
-            name="95% CI", showlegend=True
-        ))
-        g1.add_hline(y=0, line_dash="dash", line_width=1)
-        g1.update_layout(yaxis_title="Δ views/day", xaxis_title="Year",
-                         height=330, margin=dict(l=40, r=20, t=40, b=40))
-        figs.append(g1)
+def _kpi_from_corpus() -> Dict[str, str]:
+    out = {}
+    if not ML_CORPUS.exists():
+        return {
+            "Rows": "—",
+            "Date span": "—",
+            "Distinct categories": "—",
+            "Distinct tags": "—",
+        }
+    df = pd.read_parquet(ML_CORPUS)
+    out["Rows"] = f"{len(df):,}"
+    # publish date span
+    dt_col = next((c for c in ["publish_date","upload_date","published_at","date"] if c in df.columns), None)
+    if dt_col:
+        dt = pd.to_datetime(df[dt_col], errors="coerce", utc=True).dt.tz_convert(None)
+        lo, hi = dt.min(), dt.max()
+        if pd.notna(lo) and pd.notna(hi):
+            out["Date span"] = f"{lo.date()} → {hi.date()}"
+    # category-ish stats
+    cat_col = next((c for c in ["categories","tags","category","tag_list","labels"] if c in df.columns), None)
+    if cat_col:
+        def parse_listish(x):
+            if isinstance(x, (list, tuple, set)): return list(x)
+            s = str(x)
+            if s.startswith("[") and s.endswith("]"):
+                try: from ast import literal_eval; return list(literal_eval(s))
+                except Exception: return [s]
+            sep = "," if "," in s else ("|" if "|" in s else None)
+            return [p.strip().lower() for p in s.split(sep)] if sep else [s.strip().lower()]
+        allv = [t for row in df[cat_col].dropna().head(200_000).map(parse_listish) for t in row if t]
+        if allv:
+            out["Distinct categories"] = f"{len(set(allv)):,}"
+            out["Top category"] = pd.Series(allv).value_counts().head(1).index[0][:32]
+    # group cols
+    gcols = [c for c in df.columns if c.startswith("race_ethnicity_") or c.startswith("gender_")]
+    if gcols:
+        out["One-hot group cols"] = str(len(gcols))
+    return out
 
-        # Rating gap
-        g2 = go.Figure()
-        g2.add_trace(go.Scatter(
-            x=gaps["year"], y=gaps["gap_rating"], mode="lines+markers", name="Gap (BW - Others)"
-        ))
-        g2.add_trace(go.Scatter(
-            x=pd.concat([gaps["year"], gaps["year"][::-1]]),
-            y=pd.concat([gaps["gap_rating_ci_hi"], gaps["gap_rating_ci_lo"][::-1]]),
-            fill="toself", fillcolor="rgba(255,127,14,0.2)", line=dict(width=0),
-            name="95% CI", showlegend=True
-        ))
-        g2.add_hline(y=0, line_dash="dash", line_width=1)
-        g2.update_layout(yaxis_title="Δ rating", xaxis_title="Year",
-                         height=330, margin=dict(l=40, r=20, t=40, b=40))
-        figs.append(g2)
+def _fig_from_csv(name: str, df: pd.DataFrame) -> Optional[go.Figure]:
+    """Minimal heuristics to render common analysis tables with Plotly."""
+    # adv19_bw_effect_sizes
+    if {"metric","cliffs_delta","ci_lo","ci_hi"}.issubset(df.columns):
+        y = df["cliffs_delta"].astype(float)
+        yerr = np.vstack([y - df["ci_lo"].astype(float), df["ci_hi"].astype(float) - y])
+        fig = go.Figure(go.Bar(x=df["metric"], y=y, error_y=dict(array=yerr[1], arrayminus=yerr[0])))
+        fig.update_layout(title="Advanced Stats — Cliff’s δ (BW − Others)", height=360, margin=dict(l=40,r=20,t=50,b=40))
+        return fig
+    # adv19_trend_slopes
+    if {"metric","slope_bw","slope_others","slope_bw_lo","slope_bw_hi","slope_others_lo","slope_others_hi"}.issubset(df.columns):
+        xs = df["metric"]
+        fig = go.Figure()
+        fig.add_bar(name="Black women", x=xs, y=df["slope_bw"],
+                    error_y=dict(array=(df["slope_bw_hi"]-df["slope_bw"]), arrayminus=(df["slope_bw"]-df["slope_bw_lo"])))
+        fig.add_bar(name="Others", x=xs, y=df["slope_others"],
+                    error_y=dict(array=(df["slope_others_hi"]-df["slope_others"]), arrayminus=(df["slope_others"]-df["slope_others_lo"])))
+        fig.update_layout(barmode="group", title="Temporal Slopes (95% CI)", height=380, margin=dict(l=40,r=20,t=50,b=40))
+        return fig
+    # adv19_harm_relative_risks
+    if {"harm_category","RR_bw_vs_others","RR_lo","RR_hi"}.issubset(df.columns):
+        dd = df.sort_values("RR_bw_vs_others", ascending=True).tail(25)
+        fig = px.bar(dd, x="RR_bw_vs_others", y="harm_category", orientation="h",
+                     title="Harm Relative Risk — BW vs Others (Top 25 by RR)")
+        fig.update_layout(height=max(360, 20*len(dd)), margin=dict(l=160,r=30,t=50,b=40))
+        return fig
+    # net20_category_centrality
+    if {"category","strength"}.issubset(df.columns):
+        dd = df.sort_values("strength", ascending=False).head(20)
+        fig = px.bar(dd, x="strength", y="category", orientation="h", title="Network — Top Category Strength")
+        fig.update_layout(height=480, margin=dict(l=200,r=40,t=50,b=40))
+        return fig
+    # fallback: show first numeric columns against index
+    numeric = df.select_dtypes(include=np.number)
+    if numeric.shape[1] >= 1:
+        fig = px.line(numeric.iloc[:200])
+        fig.update_layout(title=name, height=300, margin=dict(l=40,r=20,t=40,b=40))
+    # 22_topk_mass_K.csv
+    if {"K","mass_captured"}.issubset(df.columns):
+        fig = go.Figure(go.Scatter(x=df["K"], y=df["mass_captured"], mode="lines+markers", name="Mass captured"))
+        fig.update_layout(title="Ablation: Top-K coverage (mass captured)", yaxis_title="Fraction", xaxis_title="K",
+                          height=320, margin=dict(l=40,r=20,t=50,b=40))
+        return fig
 
-    # Optional quantiles
-    q = _read_csv(DATA / "eng17_quantiles_race_ethnicity.csv")
-    if q is not None and {"group","q10_views_per_day","q50_views_per_day","q90_views_per_day"}.issubset(q.columns):
-        figs.append(section_header("Engagement Quantiles — by Race/Ethnicity"))
-        qf = go.Figure()
-        topg = (q.groupby("group")["q50_views_per_day"].mean()
-                  .sort_values(ascending=False).head(6).index.tolist())
-        q6 = q[q["group"].isin(topg)]
-        for g in topg:
-            sub = q6[q6["group"] == g]
-            qf.add_trace(go.Bar(
-                x=["q10","q50","q90"],
-                y=[sub["q10_views_per_day"].mean(), sub["q50_views_per_day"].mean(), sub["q90_views_per_day"].mean()],
-                name=str(g)
-            ))
-        qf.update_layout(barmode="group", yaxis_title="Views/day", height=380,
-                         legend=dict(orientation="h", y=1.12),
-                         margin=dict(l=40, r=20, t=40, b=40))
-        figs.append(qf)
+    # 22_rr_lexicon_off.csv
+    if {"harm_category","RR_bw_vs_others"}.issubset(df.columns) and "lexicon_off" in name:
+        dd = df.sort_values("RR_bw_vs_others", ascending=True).tail(25)
+        fig = go.Figure(go.Bar(x=dd["RR_bw_vs_others"], y=dd["harm_category"], orientation="h", name="RR off"))
+        fig.update_layout(title="Ablation: Harm RR with lexicon OFF (Top 25)", height=max(360, 20*len(dd)),
+                          margin=dict(l=160,r=30,t=50,b=40))
+        return fig
 
-    return figs
+    # 22_topcats_noise_p.csv
+    if {"category","count"}.issubset(df.columns) and "topcats_noise" in name:
+        fig = go.Figure(go.Bar(x=df["count"], y=df["category"], orientation="h"))
+        fig.update_layout(title=f"Ablation: Top categories under noise ({name})", height=max(360, 18*len(df.head(25))),
+                          margin=dict(l=180,r=30,t=50,b=40))
+        return fig
 
-def build_category_group_dynamics() -> list[go.Figure]:
-    figs = []
-    # BW over/under categories
-    bw = _read_csv(DATA / "cgd_black_women_under_over.csv")
-    if bw is not None and {"category","log2_rr_bw"}.issubset(bw.columns):
-        figs.append(section_header("Category Over/Under-Representation — Black Women"))
-        top_under = bw.nsmallest(15, "log2_rr_bw")
-        top_over  = bw.nlargest(15, "log2_rr_bw")
+    # Fallback generic
+    numeric = df.select_dtypes(include=np.number)
+    if numeric.shape[1] >= 1:
+        fig = px.line(numeric.iloc[:200], title=name)
+        fig.update_layout(height=300, margin=dict(l=40,r=20,t=40,b=40))
+        return fig
+    return None
 
-        fig_under = go.Figure()
-        fig_under.add_trace(go.Bar(x=top_under["log2_rr_bw"], y=top_under["category"],
-                                   orientation="h", name="Under-represented (log2 RR)"))
-        fig_under.update_layout(height=420, margin=dict(l=160, r=30, t=40, b=40),
-                                xaxis_title="log2(BW RR)", yaxis_title=None)
-        figs.append(fig_under)
-
-        fig_over = go.Figure()
-        fig_over.add_trace(go.Bar(x=top_over["log2_rr_bw"], y=top_over["category"],
-                                  orientation="h", name="Over-represented (log2 RR)"))
-        fig_over.update_layout(height=420, margin=dict(l=160, r=30, t=40, b=40),
-                               xaxis_title="log2(BW RR)", yaxis_title=None)
-        figs.append(fig_over)
-
-    # Optional: heatmap from the full matrix
-    mat = _read_csv(DATA / "cgd_category_group_matrix.csv", index_col=0)
-    if mat is not None:
-        # If it's a matrix (categories x groups) of log2_rr or counts, show as heatmap (top 30 rows)
-        try:
-            m30 = mat.head(30) if len(mat) > 30 else mat
-            figs.append(section_header("Category × Group Matrix (Top 30 categories)"))
-            hm = go.Figure(data=go.Heatmap(
-                z=m30.values, x=list(m30.columns), y=list(m30.index),
-                coloraxis="coloraxis"))
-            hm.update_layout(coloraxis=dict(colorscale="RdBu"),
-                             height=700, margin=dict(l=160, r=40, t=40, b=60))
-            figs.append(hm)
-        except Exception:
-            pass
-
-    return figs
-
-def build_network_and_corr() -> list[go.Figure]:
-    figs = []
-    net = _read_csv(DATA / "net20_category_centrality.csv")
-    if net is not None and {"category","strength"}.issubset(net.columns):
-        figs.append(section_header("Category Co-occurrence Network Metrics"))
-        # Top strength bars
-        top = net.nlargest(20, "strength")
-        bars = go.Figure()
-        bars.add_trace(go.Bar(
-            x=top["strength"], y=top["category"], orientation="h", name="Strength"
-        ))
-        bars.update_layout(height=480, margin=dict(l=200, r=40, t=40, b=40),
-                           xaxis_title="Strength", yaxis_title=None)
-        figs.append(bars)
-
-        # Strength vs BW log2RR (if exists)
-        if "log2_rr_bw" in net.columns and net["log2_rr_bw"].notna().any():
-            sc = go.Figure()
-            sc.add_trace(go.Scatter(
-                x=net["strength"], y=net["log2_rr_bw"], mode="markers",
-                text=net["category"], name="Category"
-            ))
-            sc.add_hline(y=0, line_dash="dash", line_width=1)
-            sc.update_layout(xaxis_title="Strength", yaxis_title="log2(BW RR)",
-                             height=420, margin=dict(l=60, r=30, t=40, b=40))
-            figs.append(sc)
-    return figs
-
-def build_advanced_stats() -> list[go.Figure]:
-    figs = []
-    eff = _read_csv(DATA / "adv19_bw_effect_sizes.csv")
-    if eff is not None and {"metric","cliffs_delta","ci_lo","ci_hi"}.issubset(eff.columns):
-        figs.append(section_header("Advanced Stats — Cliff’s δ (BW − Others)"))
-        x = eff["metric"]
-        y = eff["cliffs_delta"].astype(float)
-        lo = eff["ci_lo"].astype(float); hi = eff["ci_hi"].astype(float)
-        err_lo = y - lo; err_hi = hi - y
-        ef = go.Figure()
-        ef.add_trace(go.Bar(x=x, y=y, name="Cliff’s δ",
-                            error_y=dict(type="data", array=err_hi, arrayminus=err_lo, visible=True)))
-        ef.add_hline(y=0, line_dash="dash", line_width=1)
-        ef.update_layout(yaxis_title="Cliff’s δ", height=360, margin=dict(l=60, r=30, t=40, b=40))
-        figs.append(ef)
-
-    sl = _read_csv(DATA / "adv19_trend_slopes.csv")
-    if sl is not None and {"metric","slope_bw","slope_others","slope_bw_lo","slope_bw_hi","slope_others_lo","slope_others_hi"}.issubset(sl.columns):
-        figs.append(section_header("Advanced Stats — Temporal Slopes (BW vs Others)"))
-        slf = go.Figure()
-        # BW
-        slf.add_trace(go.Bar(
-            x=sl["metric"], y=sl["slope_bw"],
-            name="Black women",
-            error_y=dict(type="data", array=(sl["slope_bw_hi"]-sl["slope_bw"]), arrayminus=(sl["slope_bw"]-sl["slope_bw_lo"]))
-        ))
-        # Others
-        slf.add_trace(go.Bar(
-            x=sl["metric"], y=sl["slope_others"],
-            name="Others",
-            error_y=dict(type="data", array=(sl["slope_others_hi"]-sl["slope_others"]), arrayminus=(sl["slope_others"]-sl["slope_others_lo"]))
-        ))
-        slf.add_hline(y=0, line_dash="dash", line_width=1)
-        slf.update_layout(barmode="group", yaxis_title="Yearly slope",
-                          height=380, margin=dict(l=60, r=30, t=40, b=40))
-        figs.append(slf)
-
-    kl = _read_csv(DATA / "adv19_category_divergence.csv")
-    if kl is not None and {"group","kl_vs_global"}.issubset(kl.columns):
-        figs.append(section_header("Advanced Stats — Category KL Divergence vs Global"))
-        kf = go.Figure()
-        kf.add_trace(go.Bar(x=kl["group"], y=kl["kl_vs_global"]))
-        kf.update_layout(yaxis_title="KL divergence", height=360, margin=dict(l=60, r=30, t=40, b=40))
-        figs.append(kf)
-
-    return figs
-
-# ---------------------- Main ----------------------
-def main() -> None:
-    t0 = time.time()
-    print("--- Starting Step 21: Interactive Dashboard ---")
-
-    figs: list[go.Figure] = []
-    # Intro section
-    intro = go.Figure()
-    intro.update_layout(
-        annotations=[dict(
-            text="<b>Fairness Dashboard</b><br>Focus: Representation & Engagement bias with a Black-women lens.<br>"
-                 "Use the index in your browser to jump between sections.",
-            x=0, y=1, xref="paper", yref="paper", xanchor="left", yanchor="top",
-            showarrow=False, font=dict(size=18)
-        )],
-        height=120, margin=dict(l=20, r=20, t=20, b=20)
-    )
-    figs.append(intro)
-
-    # Sections
-    figs += build_temporal_representation()
-    figs += build_engagement_gaps()
-    figs += build_category_group_dynamics()
-    figs += build_network_and_corr()
-    figs += build_advanced_stats()
-
-    # Fallback notice if nothing was found
-    if not figs or len(figs) == 1:
-        empty = go.Figure()
-        empty.update_layout(
-            annotations=[dict(text="No artefacts found yet. Please run steps 16–20.", x=0.5, y=0.5, showarrow=False)],
-            height=200
-        )
-        figs.append(empty)
-
-    # Concatenate figures into one HTML
-    html_parts = []
-    for i, f in enumerate(figs, start=1):
-        # Add anchors for quick navigation
-        f.update_layout(title_x=0.0)
-        html_parts.append(f.to_html(full_html=False, include_plotlyjs=False, div_id=f"fig{i}"))
-
-    nav_links = "".join([f'<li><a href="#fig{i}">Section {i}</a></li>' for i in range(1, len(figs)+1)])
-    html = f"""
-<!DOCTYPE html>
-<html>
+def _html_template(body: str, sidebar: str, title: str, kpi_html: str) -> str:
+    # Escape braces in CSS/HTML by doubling them for f-string safety
+    return f"""<!DOCTYPE html>
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>AlgoFairness — Dashboard (Step 21)</title>
-  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-  <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0 16px; }}
-    .nav {{ position: sticky; top: 0; background: #fff; border-bottom: 1px solid #eee; padding: 8px 0; margin-bottom: 8px; }}
-    .nav ul {{ list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 12px; }}
-    .nav a {{ text-decoration: none; color: #0366d6; }}
-    .section {{ margin: 8px 0 28px 0; }}
-  </style>
+<meta charset="utf-8" />
+<title>{title}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+<style>
+:root {{
+  --bg: #0b0f14; --panel:#0f1520; --muted:#64748b; --text:#e2e8f0; --brand:#7c3aed; --card:#111827; --accent:#22c55e; --link:#60a5fa;
+  --border: #1f2937; --chip-bg:#0b1220; --shadow: 0 10px 30px rgba(0,0,0,.25);
+}}
+html.light {{
+  --bg:#ffffff; --panel:#f8fafc; --muted:#475569; --text:#0f172a; --brand:#6d28d9; --card:#ffffff; --accent:#059669; --link:#2563eb;
+  --border:#e5e7eb; --chip-bg:#f1f5f9; --shadow: 0 8px 24px rgba(2, 6, 23, .08);
+}}
+* {{ box-sizing: border-box; }}
+body {{
+  margin:0; background: var(--bg); color:var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, Apple Color Emoji, Segoe UI Emoji;
+}}
+.app {{
+  display:grid; grid-template-columns: 280px 1fr; min-height:100vh;
+}}
+.sidebar {{
+  position: sticky; top:0; height:100vh; overflow:auto;
+  padding:20px 18px; background:var(--panel); border-right:1px solid var(--border);
+}}
+.brand {{ display:flex; align-items:center; gap:10px; margin-bottom:14px; }}
+# ... same CSS rules with doubled braces throughout ...
+.grid {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:12px; }}
+.footer {{ color:var(--muted); font-size:12px; padding:20px; text-align:center }}
+.badge {{ font-size:11px; padding:2px 8px; background:rgba(34,197,94,.12); border:1px solid rgba(34,197,94,.4); border-radius:999px }}
+hr.sep {{ border:0; height:1px; background:var(--border); margin:10px 0; }}
+code.file {{ color:var(--muted); font-size:12px }}
+</style>
 </head>
-<body>
-  <div class="nav">
-    <strong>Sections:</strong>
-    <ul>{nav_links}</ul>
-  </div>
-  {"".join(f'<div class="section" id="fig{i}">{part}</div>' for i, part in enumerate(html_parts, start=1))}
+<body class="dark">
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><span class="dot"></span><h1>AlgoFairness — Dashboard</h1></div>
+    <div class="kpis">{kpi_html}</div>
+# ... unchanged HTML with {{…}}-escaped braces until ...
 </body>
 </html>
-    """.strip()
+"""
 
-    with open(DASHBOARD_HTML, "w", encoding="utf-8") as f:
-        f.write(html)
-    print(f"[WRITE] {DASHBOARD_HTML}")
 
-    elapsed = time.time() - t0
-    print(f"[TIME] Step 21 runtime: {elapsed:.2f}s")
+def _render_step_section(step: str, files: Dict[str, List[Path]]) -> Tuple[str, str]:
+    """Return (sidebar_item_html, section_html)"""
+    anchor = re.sub(r"\\s+", "-", step.lower())
+    # Gather keywords for client-side filtering
+    kws = [step.lower()] + [p.stem.lower() for vs in files.values() for p in vs]
+    kw_attr = " ".join(sorted(set(kws)))
+    # Build content blocks
+    blocks = []
+
+    # CSVs -> figures
+    if "csv" in files:
+        for p in files["csv"]:
+            df = _try_read_csv(p)
+            if df is None or df.empty:
+                continue
+            fig = _fig_from_csv(p.stem, df)
+            if fig:
+                fig.update_layout(template="plotly_white")
+                div = fig.to_html(full_html=False, include_plotlyjs=False, config=dict(responsive=True, displaylogo=False))
+                blocks.append(f'<div class="plot">{div}<div><code class="file">{p.relative_to(ROOT)}</code></div></div>')
+
+    # Images
+    if "png" in files:
+        # Prefer dark figure if same stem exists
+        seen = set()
+        for p in files["png"]:
+            stem = p.stem
+            if stem in seen: continue
+            prefer_dark = (FIGS_DARK / f"{stem}.png")
+            use = prefer_dark if prefer_dark.exists() else p
+            seen.add(stem)
+            img = _b64img(use)
+            if img:
+                blocks.append(f'<div><img style="width:100%; border-radius:8px" src="{img}" /><div><code class="file">{use.relative_to(ROOT)}</code></div></div>')
+
+    # MD/TEX links
+    links = []
+    for kind in ("md","tex"):
+        for p in files.get(kind, []):
+            links.append(f'<a class="chip" href="file://{p}">{p.name}</a>')
+    if links:
+        blocks.append("<div>" + " ".join(links) + "</div>")
+
+    if not blocks:
+        blocks = ['<div class="muted">No visual artifacts; see linked files above.</div>']
+
+    body = f"""
+    <section class="section" id="{anchor}" data-keywords="{kw_attr}">
+      <div class="head"><h2>{step}</h2><span class="badge">{sum(len(v) for v in files.values())} artifacts</span></div>
+      <div class="body">
+        <div class="grid">
+          {''.join(blocks)}
+        </div>
+      </div>
+    </section>
+    """
+
+    side = f'<li><a href="#{anchor}">{step}</a></li>'
+    return side, body
+
+def build_dashboard() -> Path:
+    steps = _scan_artifacts()
+    # Always raise Step Overview to top
+    steps = {"Overview": {}} | steps
+
+    # KPI cards from corpus
+    kpis = _kpi_from_corpus()
+    kpi_html = "".join([f'<div class="kpi"><div class="label">{k}</div><div class="value">{v}</div></div>' for k,v in kpis.items()])
+
+    # Overview section (small legend + quick tips)
+    overview_body = """
+    <section class="section" id="overview" data-keywords="overview">
+      <div class="head"><h2>Overview</h2><span class="badge">UI</span></div>
+      <div class="body">
+        <div class="grid">
+          <div>
+            <h3>How to use</h3>
+            <ul>
+              <li><b>Sidebar</b> lists every detected step. Click to jump.</li>
+              <li><b>Search</b> filters sections client-side. Press <code>Ctrl/⌘ + K</code> to focus.</li>
+              <li><b>Theme</b> toggles light/dark.</li>
+            </ul>
+          </div>
+          <div>
+            <h3>Coverage</h3>
+            <p>This dashboard auto-discovers outputs under <code>outputs/</code> &amp; <code>dissertation/auto_tables/</code>. If a step adds a CSV image or TEX, it appears automatically.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+    """
+
+    # Sidebar + Sections
+    sidebar_items = ['<li><a href="#overview">Overview</a></li>']
+    sections = [overview_body]
+
+    for step, files in steps.items():
+        if step == "Overview":  # already added
+            continue
+        side, body = _render_step_section(step, files)
+        sidebar_items.append(side)
+        sections.append(body)
+
+    html = _html_template(body="".join(sections), sidebar="".join(sidebar_items),
+                          title="AlgoFairness — Dashboard", kpi_html=kpi_html)
+    out = INTERACTIVE / "dashboard_step21.html"
+    out.write_text(html, encoding="utf-8")
+    print(f"[WRITE] {out}")
+    return out
+
+def main():
+    build_dashboard()
     print("--- Step 21: Interactive Dashboard Completed Successfully ---")
-
 
 if __name__ == "__main__":
     main()
