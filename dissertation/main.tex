@@ -1,0 +1,72 @@
+\documentclass[12pt, a4paper]{report}
+
+% --- PACKAGES ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs} % For professional tables
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage[a4paper, margin=1in]{geometry}
+\usepackage{hyperref} % For clickable links and cross-references
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,      
+    urlcolor=cyan,
+}
+\usepackage{times} % Use Times New Roman font
+
+% --- DOCUMENT ---
+\begin{document}
+
+% --- TITLE PAGE ---
+\begin{titlepage}
+    \centering
+    \vspace*{1cm}
+    \textbf{\Large University of Essex} \\
+    \vspace{0.5cm}
+    \textbf{\large School of Computer Science & Electronic Engineering} \\
+    \vspace{1.5cm}
+    \textbf{\Huge AlgoFairness: An Auditing Pipeline for Adult Content Categorization} \\
+    \vspace{1cm}
+    \textbf{\Large (Pornometrics)} \\
+    \vspace{2cm}
+    \textbf{Louise Silva Ferreira} \\
+    Registration: 2404017 \\
+    \vspace{1cm}
+    
+    \vfill
+    
+    A dissertation submitted in partial fulfillment of the requirements for the degree of \\
+    \textbf{MSc in Computer Science} \\
+    \vspace{0.8cm}
+    Supervisor: Dr. Vishal Krishna Singh \\
+    \vspace{1cm}
+    \today
+\end{titlepage}
+
+% --- TABLE OF CONTENTS ---
+\tableofcontents
+\listoffigures
+\listoftables
+\newpage
+
+% --- CHAPTERS ---
+% Each chapter is an independent file in the 'chapters' subdirectory.
+\input{chapters/01_introduction.tex}
+\input{chapters/02_literature_review.tex}
+\input{chapters/03_methodology.tex}
+\input{chapters/04_results.tex}
+\input{chapters/05_discussion.tex}
+\input{chapters/06_project_management.tex}
+\input{chapters/07_limitations.tex}
+
+% --- APPENDICES ---
+\appendix
+\input{chapters/figures_appendix.tex}
+
+\end{document}
