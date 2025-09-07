@@ -1,0 +1,21 @@
+\begin{table}[htbp]
+\centering
+\caption{Fairness Disparity Metrics for Baseline RF Model (relative to 'race_ethnicity_white').}
+\label{tab:fairness-disparities}
+\begin{tabular}{llll}
+\toprule
+ & Accuracy Disparity & Equal Opportunity Difference & Predictive Parity Difference \\
+Comparison Group &  &  &  \\
+\midrule
+race\_ethnicity\_asian & 0.000 & -0.031 & -0.011 \\
+race\_ethnicity\_black & 0.034 & -0.012 & -0.001 \\
+race\_ethnicity\_latina & -0.024 & 0.031 & 0.014 \\
+race\_ethnicity\_middle\_eastern\_north\_african & 0.050 & 0.096 & 0.069 \\
+race\_ethnicity\_mixed\_or\_other & 0.044 & 0.006 & 0.012 \\
+\bottomrule
+\end{tabular}
+
+\begin{tablenotes}[flushleft]
+\item \small{Positive values indicate the privileged group performed better. Equal Opportunity Difference is based on True Positive Rate (Recall).}
+\end{tablenotes}
+\end{table}
